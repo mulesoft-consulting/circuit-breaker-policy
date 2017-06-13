@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policy xmlns="http://www.mulesoft.org/schema/mule/policy"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:spring="http://www.springframework.org/schema/beans"
+        xmlns:mule="http://www.mulesoft.org/schema/mule/core"
+        xmlns:mule-ss="http://www.mulesoft.org/schema/mule/spring-security"
+        xmlns:ss="http://www.springframework.org/schema/security"
+        xmlns:api-platform-gw="http://www.mulesoft.org/schema/mule/api-platform-gw"
+        xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+        xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting"
+        xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore"
+        xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+        xsi:schemaLocation="http://www.mulesoft.org/schema/mule/policy http://www.mulesoft.org/schema/mule/policy/current/mule-policy.xsd
+              http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+              http://www.mulesoft.org/schema/mule/spring-security http://www.mulesoft.org/schema/mule/spring-security/current/mule-spring-security.xsd
+              http://www.springframework.org/schema/security http://www.springframework.org/schema/security/spring-security-current.xsd
+              http://www.mulesoft.org/schema/mule/api-platform-gw http://www.mulesoft.org/schema/mule/api-platform-gw/current/mule-api-platform-gw.xsd
+              http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+              http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd
+              http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd
+              http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+              http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
+
+	<spring:beans>
+		<spring:bean id="objStore" name="objStoreBean" class="org.mule.util.store.ManagedObjectStore">
+		    <spring:property name="storeName" value="CircuitBreaerObjStore"/>
+		</spring:bean>
+		<spring:bean id="objStoreMutex" name="objStoreSemaphore" class="java.util.concurrent.Semaphore" >
+			<spring:constructor-arg value="100"/>
+		</spring:bean>
+		<spring:bean id="objKeyPrefix" name="objKeyPrefix" class="java.lang.String">
+			<spring:constructor-arg value="{{ wait_time }}-{{ max_error_count }}-{{ apiName }}-{{ apiVersionName }}-{{ policyId }}-"/>
+		</spring:bean>
+  	</spring:beans>
+  
+    <pointcut>
+        <api-platform-gw:api-pointcut apiName="{{ apiName }}" apiVersion="{{ apiVersionName }}"/>
+    </pointcut>
+
+    <before>
+    	<mule:processor ref="CircuitBreakerProject_evalTripCondition" />
+    	<mule:message-filter xmlns:mule="http://www.mulesoft.org/schema/mule/core" onUnaccepted="CircuitBreakerProject_handleError">
+			<mule:expression-filter xmlns:mule="http://www.mulesoft.org/schema/mule/core" 
+			expression="#[flowVars.breakerTripped != true]" name="BeforeBreakerTrippedFilter"/>
+		</mule:message-filter>
+    </before>
+    
+    <after>
+    	<mule:processor ref="CircuitBreakerProject_evalTripCondition" />
+    	<mule:set-variable variableName="evalExoression" value="{{ err_msg_trap_expr }}"/>
+    	<mule:message-filter xmlns:mule="http://www.mulesoft.org/schema/mule/core" onUnaccepted="CircuitBreakerProject_handleError">
+	      <mule:expression-filter xmlns:mule="http://www.mulesoft.org/schema/mule/core" expression="#[flowVars.evalExoression != true]" name="ErrorInMsgFilter"/>
+	    </mule:message-filter>
+    </after>
+
+    <after-exception>
+    	<mule:processor ref="CircuitBreakerProject_handleError" />
+    </after-exception>
+    
+<!-- ======== Additional Flows======== -->
+
+	<mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_init">
+		<mule:expression-component><![CDATA[
+		app.registry['objStoreMutex'].acquire();
+		if (! app.registry['objStore'].contains(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count')) {
+			app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count', 0);
+		}
+		if (! app.registry['objStore'].contains(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped')) {
+   			app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped',
+   			false);
+   		}
+   		if (! app.registry['objStore'].contains(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts')) {
+    		app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts',
+    		0);
+    	}
+    	flowVars.breakerCount = app.registry['objStore'].retrieve(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count');
+    	flowVars.breakerExpiryTS = app.registry['objStore'].retrieve(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts');
+    	flowVars.breakerTripped = app.registry['objStore'].retrieve(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped');
+   		app.registry['objStoreMutex'].release();
+		]]>
+		</mule:expression-component>
+   	</mule:processor-chain>
+
+	<mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_evalTripCondition">
+		<mule:processor ref="CircuitBreakerProject_init"/>
+		<mule:logger level="DEBUG" message="breakerTripped = #[flowVars.breakerTripped]"/>
+	   	<mule:logger level="DEBUG" message="breakerCount = #[flowVars.breakerCount]"/>
+	   	<mule:logger level="DEBUG" message="breakerExpiryTS = #[flowVars.breakerExpiryTS]"/>
+		<mule:choice>
+			<mule:when expression="#[(flowVars.breakerTripped == true) &amp;&amp; server.dateTime.isBefore(flowVars.breakerExpiryTS) ]">
+				<mule:processor ref="CircuitBreakerProject_unavailableMessage"/>
+	      	</mule:when>
+	      	<mule:when expression="#[(flowVars.breakerTripped == true) &amp;&amp; server.dateTime.isAfter(flowVars.breakerExpiryTS)]">
+	      		<mule:processor ref="CircuitBreakerProject_reset"/>
+	      		<mule:set-variable variableName="breakerTripped" value="false"/>
+	      	</mule:when>
+	      	<mule:when expression="#[flowVars.breakerCount == {{ max_error_count }} ]">
+				<mule:processor ref="CircuitBreakerProject_trip"/>
+	      	</mule:when>
+	      	<mule:otherwise>
+	      		<mule:logger level="DEBUG" message="NOOP"/>
+	      	</mule:otherwise>
+		</mule:choice>
+	</mule:processor-chain>
+	
+	<mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_handleError">
+	    <mule:expression-component><![CDATA[
+	    	app.registry['objStoreMutex'].acquire();
+	    	currentCount = app.registry['objStore'].retrieve(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count');
+	    	app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count');
+	    	app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count', currentCount + 1);
+	    	app.registry['objStoreMutex'].release();
+			]]>
+	   	</mule:expression-component>
+	   	<mule:processor ref="CircuitBreakerProject_evalTripCondition"/>
+	</mule:processor-chain>
+
+    <mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_unavailableMessage">
+   		<mule:logger message="endpoint unavailable." level="DEBUG" />
+   		<mule:message-properties-transformer scope="outbound">
+        	<mule:add-message-property key="http.status" value="503"/>
+            <mule:add-message-property key="Content-type" value="text/html; charset=utf-8"/>
+        </mule:message-properties-transformer>
+        <mule:set-payload value="Service Not available ! Please try again later ! ETA {{wait_time}} ms"/>
+	</mule:processor-chain>
+
+	<mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_trip">
+   		<mule:expression-component><![CDATA[
+   			app.registry['objStoreMutex'].acquire();
+   			app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped');
+	    	app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped', true);
+	    	app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts');
+	    	app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts', server.dateTime.plusMilliSeconds({{ wait_time }}));
+	    	app.registry['objStoreMutex'].release();
+	    ]]>
+	    </mule:expression-component>
+	    <mule:logger message="breaker tripped!" level="DEBUG" />
+	    <mule:processor ref="CircuitBreakerProject_unavailableMessage"/>
+   </mule:processor-chain>
+   
+   <mule:processor-chain xmlns:mule="http://www.mulesoft.org/schema/mule/core" name="CircuitBreakerProject_reset">
+   		<mule:expression-component><![CDATA[
+   			app.registry['objStoreMutex'].acquire();
+   			app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count');
+   			app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-count', 0);
+	    	app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped');
+	    	app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-tripped', false);
+	    	app.registry['objStore'].remove(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts');
+	    	app.registry['objStore'].store(mule.nodeId + app.registry['objKeyPrefix'] + 'breaker-expiry-ts', 0);
+	    	app.registry['objStoreMutex'].release();
+	    ]]>
+	    </mule:expression-component>
+	    <mule:logger message="breaker reset." level="DEBUG" />
+   </mule:processor-chain>
+</policy>

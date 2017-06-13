@@ -1,0 +1,53 @@
+#
+# This is an example of a Custom Policy Definition file.
+# This file is used by API Platform to:
+# - Auto-generate a configuration UI for your custom policy.
+# - Determine policy dependencies
+#
+# See: https://docs.mulesoft.com/api-manager/applying-custom-policies#policy-definition 
+
+# Name used to describe the policy in API Platform
+name: Circuit Breaker Policy
+
+# A more detailed description of the policy
+description: An automatic switch that stops the invocation of the target endpoint in the event of a failure.
+
+# Category is just a plain text used in API Platform to list policies
+category: Security
+
+# True if the policy can work on its own or false if the policy can be 
+# applied only as part of another policy.
+standalone: true
+
+# A list of strings that describes characteristics provided by this policy.
+# API Platform uses an indirect dependency mechanisms: policies can provide
+# or require characteristics, the platform will inform you about requirements
+# but it will not force you to use a particular policy
+providedCharacteristics: [Circuit Breaker]
+requiredCharacteristics: []
+
+requiresConnectivity: true
+# This defines custom configuration parameters for your policy template
+configuration:  
+  - propertyName: max_error_count
+    name: error_count
+    description: Number of errors upon which the breaker triggers
+    type: int
+    defaultValue: 3
+    minimumValue: 1
+    maximumValue: 1000
+    optional: false  
+  - propertyName: wait_time
+    name: wait_time
+    description: Ammount of time the breaker will be on until it gets opened again (ms)
+    type: int
+    defaultValue: 60000
+    minimumValue: 1
+    maximumValue: 360000
+    optional: false 
+  - propertyName: err_msg_trap_expr
+    name: error message trap MEL Expression
+    description: A MEL expression used to trap for errors in the resulting message
+    type: expression
+    defaultValue: "#[message.payloadAs(java.lang.String).contains('Error')]"
+    optional: false
