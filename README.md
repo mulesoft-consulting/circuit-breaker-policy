@@ -1,4 +1,4 @@
-### JWT policy ###
+### Circuit Breaker policy ###
 
 This policy implements the Circuit Breaker pattern by monitoring a configurable number of exceptions or errors returned from the target endpoint.
 
