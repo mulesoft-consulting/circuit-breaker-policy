@@ -25,7 +25,7 @@ standalone: true
 # but it will not force you to use a particular policy
 providedCharacteristics: [Circuit Breaker]
 requiredCharacteristics: []
-
+resourceLevelSupported: true
 requiresConnectivity: true
 # This defines custom configuration parameters for your policy template
 configuration:  
